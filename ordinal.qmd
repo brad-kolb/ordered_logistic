@@ -1,0 +1,1058 @@
+---
+title: "Ordinal treatment effect of mechanical thrombectomy"
+author: "Bradley Kolb"
+format: html
+embed-resources: true
+editor: visual
+fig-format: png
+fig-dpi: 300
+execute: 
+  echo: false
+  warning: false
+editor_options: 
+  chunk_output_type: console
+---
+
+Comprehensive evaluation of randomized evidence for mechanical thrombectomy using bayesian implementation of random effects meta-analysis with ordinal data in `stan` using `brms`.
+
+# Dependencies
+
+```{r libraries}
+#| echo: TRUE
+suppressMessages({
+  library(tidyverse)
+  library(brms)
+  library(posterior)
+  library(here)
+  library(tinytable)
+})
+```
+
+# Data
+
+```{r}
+#| echo: true
+all_dat <- readRDS("all_dat.rds")
+```
+
+## Data description
+
+@tbl-trials shows the data from the `r length(unique(all_dat$trial))` randomized trials of thrombectomy. Trials are categorized by type of stroke treated.
+
+```{r}
+#| label: tbl-trials
+#| tbl-cap: Ordinal outcomes from 24 thrombectomy RCTs
+all_dat %>% 
+  select(-c(type_id, trial_id, treatment_id)) %>% 
+  tt() %>% 
+  group_tt(
+    j = list(
+      "mRS at six months" = 4:10))
+```
+
+"Large" refers to anterior circulation strokes with a large infarct core. "Early" refers to anterior circulation strokes with a small core, treated in an early time window. "Late" refers to anterior circulation strokes with a small core, treated in an extended time window. "Basilar" refers to posterior circulation strokes due to vertebro-basilar occlusion. "Medium" refers to anterior circulation strokes due to medium vessel occlusion. 
+
+## Data exploration
+
+@fig-trials plots the data from @tbl-trials.
+
+```{r}
+all_dat_long <- all_dat %>%
+  pivot_longer(
+    cols = -c(type, type_id, trial, trial_id, treatment, treatment_id),
+    names_to = "ordinal_value", 
+    values_to = "count"
+  ) %>% 
+  uncount(count) %>%
+  arrange(treatment_id, ordinal_value) %>% 
+  mutate(ordinal_value = case_when(
+    ordinal_value == "zero" ~ 0,
+    ordinal_value == "one" ~ 1, 
+    ordinal_value == "two" ~ 2,
+    ordinal_value == "three" ~ 3,
+    ordinal_value == "four" ~ 4,
+    ordinal_value == "five" ~ 5,
+    ordinal_value == "six" ~ 6
+  ))
+```
+
+```{r}
+#| echo: false
+#| label: fig-trials
+#| fig-cap: Distribution of ordinal values by treatment group for all thrombectomy RCTs
+
+all_dat_long %>%
+  # First count occurrences by group
+  count(type, trial, treatment, ordinal_value) %>%
+  # Then calculate proportions within each group
+  group_by(type, trial, treatment) %>%
+  mutate(proportion = n / sum(n)) %>% 
+  ggplot(aes(x = ordinal_value, y = proportion, fill = treatment)) +
+  facet_wrap(vars(trial)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  scale_fill_manual(values = c("thrombectomy" = "#ff7f0e", "medical" = "#1f77b4")) +
+  scale_x_continuous(breaks = 0:6) +
+  labs(
+    x = "modified Rankin score at six months",
+    y = "proportion",
+    fill = "treatment"
+  ) +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "right"
+  )
+```
+
+# Model
+
+## Model description
+
+We use `brms` to define and fit an ordinal meta-regression in the probabilistic programming language `stan`. Specifically, we use an adjacent category ordinal regression with category specific treatment effects, correlated trial-specific varying intercepts and slopes, and a predictor term for stroke type.
+
+## Model summary
+
+Summary of the model is shown as follows.
+
+```{r fit ordinal meta-regression with informed priors}
+# Ordinal Meta-Regression with Informed Priors
+# formula <- ordinal_value ~ type + cs(treatment) + (1 + treatment | trial)
+# priors <- c(prior(normal(0, 1), class = "b"),
+#             prior(normal(0, 1), class = "sd"),
+#             prior(normal(0, 1), class = "Intercept"))
+# 
+# 
+# omr_ip <- brm(
+#   formula = formula,
+#   prior = priors, 
+#   data = all_dat_long,
+#   family = acat(link = "logit"),
+#   chains = 4, 
+#   cores = 4, 
+#   backend = "cmdstanr",
+#   # refresh = 0,
+#   seed = seed
+# )
+# 
+# omr_ip <- add_criterion(omr_ip, "loo")
+
+omr_ip <- readRDS("omr_ip.rds")
+
+summary(omr_ip)
+```
+
+## Model diagnostics
+
+Because the model is fit to the data using MCMC, it is important assess for any errors during the sampling process.
+
+@fig-trace shows the trace plots for each parameter of the model. Trace plots show good exploration of the parameter space.
+
+```{r}
+#| echo: false
+#| label: fig-trace
+#| fig-cap: Trace plots for each parameter
+mcmc_plot(omr_ip, type = "trace")
+```
+
+There were no divergences during model fit. @fig-rhat shows rhat values all less than 1.05.
+
+```{r}
+#| echo: false
+#| label: fig-rhat
+#| fig-cap: Rhat values for each parameter
+mcmc_plot(omr_ip, type = "rhat")
+```
+
+@fig-neff shows that the estimated ratio of effective sample sizes to total sample sizes was greater than 0.1 for all parameters.
+
+```{r}
+#| echo: false
+#| label: fig-neff
+#| fig-cap: Estimated ratio of effective to total sample size for each parameter
+mcmc_plot(omr_ip, type = "neff")
+```
+
+## Model checks
+
+In addition to verifying that there were no technical problems with the MCMC algorithm when fitting the model, we also need to check for evidence of over-fitting or under-fitting to the data.
+
+@fig-ppc is a graphical posterior predictive check of the model fit to the observed data. This can be thought of as the bayesian analogue of a chi-squared goodness-of-fit test. The posterior predictive distributions of the model (y~rep~) all include the observed values (y). There is no obvious evidence of misfit of model predictions to data.
+
+```{r posterior predictive check ordinal meta-regression with informed priors}
+#| echo: false
+#| label: fig-ppc
+#| fig-cap: Graphical posterior predictive check
+pp_check(omr_ip,
+         type = "bars_grouped",
+         group = "treatment",
+         ndraws = 100) +
+  theme_bw(base_size = 12)
+```
+
+We can also check the predictive performance of the model using leave-one-out cross-validation.
+
+```{r}
+loo(omr_ip)
+```
+
+There are no signs of misspecification: estimated parameters closely match actual parameters, Monte Carlo standard error of the expected log posterior density is low, and all Pareto K estimates are less than 0.5.
+
+# Results
+
+## Ordinal treatment effect of thrombectomy across stroke types
+
+The model considers a hypothetical patient enrolled in a new randomized trial of thrombectomy and uses the totality of observed data from previous trials to generate expected probabilities for each mRS at six months if the patient were enrolled in the medical arm of the trial, as well as the change in probability (either increase or decrease) if the patient was instead enrolled in the treatment arm of the trial. We refer to these changes as the ordinal treatment effect.
+
+```{r response scale contrasts}
+#| echo: false
+
+omr_ip_rsc <- function(model, types = c("large", "early", "late", "basilar", "medium", "historical")) {
+  # Initialize an empty list to store results
+  results <- list()
+  
+  # Loop through each type
+  for (current_type in types) {
+    # Create new data frames for each type
+    newdata_control <- data.frame(treatment = "medical", type = current_type)
+    newdata_treat <- data.frame(treatment = "thrombectomy", type = current_type)
+    
+    # Calculate posterior predictions
+    pp_control <- posterior_epred(
+      model,
+      newdata = newdata_control,
+      re_formula = NA,
+      ndraws = NULL
+    )
+    
+    pp_treat <- posterior_epred(
+      model,
+      newdata = newdata_treat,
+      re_formula = NA
+    )
+    
+    # Calculate difference
+    diff_posterior <- pp_treat - pp_control
+    
+    # Store summary for current type
+    results[[current_type]] <- summarize_draws(
+      diff_posterior[, 1, ],
+      "mean",
+      ~quantile(.x, probs = c(0.025, 0.975))
+    ) %>%
+      mutate(type = current_type)
+  }
+  
+  # Combine all results into a single data frame
+  final_summary <- bind_rows(results) %>% 
+    mutate(variable = rep(0:6, 6))
+  
+  return(final_summary)
+}
+
+```
+
+```{r response scale baserates}
+#| echo: false
+omr_ip_rsb <- function(model, types = c("large", "early", "late", "basilar", "medium", "historical")) {
+  require(posterior)
+  # Initialize an empty list to store results
+  results <- list()
+  
+  # Loop through each type
+  for (current_type in types) {
+    # Create new data frames for each type
+    newdata_control <- data.frame(treatment = "medical", type = current_type)
+    
+    # Calculate posterior predictions
+    pp_control <- posterior_epred(
+      model,
+      newdata = newdata_control,
+      re_formula = NA,
+      ndraws = NULL
+    )
+    
+    # Store summary for current type
+    results[[current_type]] <- summarize_draws(
+      pp_control[, 1, ],
+      "mean",
+      ~quantile(.x, probs = c(0.025, 0.975))
+    ) %>%
+      mutate(type = current_type)
+  }
+  
+  # Combine all results into a single data frame
+  final_summary <- bind_rows(results) %>% 
+    mutate(variable  = rep(0:6, 6))
+  
+  return(final_summary)
+}
+```
+
+### Large stroke
+
+@tbl-largebaserate shows the expected ordinal probabilities for a hypothetical patient randomized to the medical treatment arm of a new large core stroke trial.
+
+```{r}
+#| echo: false
+#| label: tbl-largebaserate
+#| tbl-cap: Expected ordinal probabilities in medical arm of hypothetical new large stroke trial
+omr_ip_rsb(omr_ip) %>% 
+  filter(type == "large") %>% 
+  select(-type) %>% 
+  rename(mRS = variable,
+         low = '2.5%',
+         high = '97.5%') %>% 
+  mutate(mean = round(mean*100, digits = 1),
+         low = round(low*100, digits = 1),
+         high = round(high*100, digits = 1)) %>% 
+  tt() %>% 
+  group_tt(
+    j = list(
+      "estimate" = 2:4))
+```
+
+@tbl-large shows the expected ordinal treatment effect of thrombectomy in this trial.
+
+```{r}
+#| echo: false
+#| label: tbl-large
+#| tbl-cap: Expected ordinal treatment effect of thrombectomy in new large stroke trial. Positive numbers reflect an absolute increase in probability of the mRS category. Negative numbers reflect an absolute decrease.
+
+omr_ip_rsc(omr_ip) %>% 
+  filter(type == "large") %>% 
+  select(-type) %>% 
+  rename(mRS = variable,
+         low = '2.5%',
+         high = '97.5%') %>% 
+  mutate(mean = round(mean*100, digits = 1),
+         low = round(low*100, digits = 1),
+         high = round(high*100, digits = 1)) %>% 
+  tt() %>% 
+  group_tt(
+    j = list(
+      "estimate" = 2:4))
+```
+
+### Small stroke, early window
+
+@tbl-earlybaserate shows the expected ordinal probabilities for a hypothetical patient randomized to the medical treatment arm of a new small stroke early window trial.
+
+```{r}
+#| echo: false
+#| label: tbl-earlybaserate
+#| tbl-cap: Expected ordinal probabilities in medical arm of hypothetical new small stroke early window trial
+omr_ip_rsb(omr_ip) %>% 
+  filter(type == "early") %>% 
+  select(-type) %>% 
+  rename(mRS = variable,
+         low = '2.5%',
+         high = '97.5%') %>% 
+  mutate(mean = round(mean*100, digits = 1),
+         low = round(low*100, digits = 1),
+         high = round(high*100, digits = 1)) %>% 
+  tt() %>% 
+  group_tt(
+    j = list(
+      "estimate" = 2:4))
+```
+
+@tbl-large shows the expected ordinal treatment effect of thrombectomy in this trial.
+
+```{r}
+#| echo: false
+#| label: tbl-early
+#| tbl-cap: Expected ordinal treatment effect of thrombectomy in new small stroke early window trial. Positive numbers reflect an absolute increase in probability of the mRS category. Negative numbers reflect an absolute decrease.
+omr_ip_rsc(omr_ip) %>% 
+  filter(type == "early") %>% 
+  select(-type) %>% 
+  rename(mRS = variable,
+         low = '2.5%',
+         high = '97.5%') %>% 
+  mutate(mean = round(mean*100, digits = 1),
+         low = round(low*100, digits = 1),
+         high = round(high*100, digits = 1)) %>% 
+  tt() %>% 
+  group_tt(
+    j = list(
+      "estimate" = 2:4))
+```
+
+### Small stroke, late window
+
+@tbl-latebaserate shows the expected ordinal probabilities for a hypothetical patient randomized to the medical treatment arm of a new small stroke late window trial.
+
+```{r}
+#| echo: false
+#| label: tbl-latebaserate
+#| tbl-cap: Expected ordinal probabilities in medical arm of hypothetical new small stroke late window trial
+omr_ip_rsb(omr_ip) %>% 
+  filter(type == "late") %>% 
+  select(-type) %>% 
+  rename(mRS = variable,
+         low = '2.5%',
+         high = '97.5%') %>% 
+  mutate(mean = round(mean*100, digits = 1),
+         low = round(low*100, digits = 1),
+         high = round(high*100, digits = 1)) %>% 
+  tt() %>% 
+  group_tt(
+    j = list(
+      "estimate" = 2:4))
+```
+
+@tbl-late shows the expected ordinal treatment effect of thrombectomy in this trial.
+
+```{r}
+#| echo: false
+#| label: tbl-late
+#| tbl-cap: Expected ordinal treatment effect of thrombectomy in new small stroke late window trial. Positive numbers reflect an absolute increase in probability of the mRS category. Negative numbers reflect an absolute decrease.
+omr_ip_rsc(omr_ip) %>% 
+  filter(type == "late") %>% 
+  select(-type) %>% 
+  rename(mRS = variable,
+         low = '2.5%',
+         high = '97.5%') %>% 
+  mutate(mean = round(mean*100, digits = 1),
+         low = round(low*100, digits = 1),
+         high = round(high*100, digits = 1)) %>% 
+  tt() %>% 
+  group_tt(
+    j = list(
+      "estimate" = 2:4))
+```
+
+### Basilar stroke
+
+@tbl-basilarbaserate shows the expected ordinal probabilities for a hypothetical patient randomized to the medical treatment arm of a new small stroke late window trial.
+
+```{r}
+#| echo: false
+#| label: tbl-basilarbaserate
+#| tbl-cap: Expected ordinal probabilities in medical arm of hypothetical new basilar stroke trial
+omr_ip_rsb(omr_ip) %>% 
+  filter(type == "basilar") %>% 
+  select(-type) %>% 
+  rename(mRS = variable,
+         low = '2.5%',
+         high = '97.5%') %>% 
+  mutate(mean = round(mean*100, digits = 1),
+         low = round(low*100, digits = 1),
+         high = round(high*100, digits = 1)) %>% 
+  tt() %>% 
+  group_tt(
+    j = list(
+      "estimate" = 2:4))
+```
+
+@tbl-basilar shows the expected ordinal treatment effect of thrombectomy in this trial.
+
+```{r}
+#| echo: false
+#| label: tbl-basilar
+#| tbl-cap: Expected ordinal treatment effect of thrombectomy in new basilar stroke trial. Positive numbers reflect an absolute increase in probability of the mRS category. Negative numbers reflect an absolute decrease.
+omr_ip_rsc(omr_ip) %>% 
+  filter(type == "basilar") %>% 
+  select(-type) %>% 
+  rename(mRS = variable,
+         low = '2.5%',
+         high = '97.5%') %>% 
+  mutate(mean = round(mean*100, digits = 1),
+         low = round(low*100, digits = 1),
+         high = round(high*100, digits = 1)) %>% 
+  tt() %>% 
+  group_tt(
+    j = list(
+      "estimate" = 2:4))
+```
+
+### Medium stroke
+@tbl-mediumbaserate shows the expected ordinal probabilities for a hypothetical patient randomized to the medical treatment arm of a new medium stroke trial.
+
+```{r}
+#| echo: false
+#| label: tbl-mediumbaserate
+#| tbl-cap: Expected ordinal probabilities in medical arm of hypothetical new medium stroke trial
+omr_ip_rsb(omr_ip) %>% 
+  filter(type == "medium") %>% 
+  select(-type) %>% 
+  rename(mRS = variable,
+         low = '2.5%',
+         high = '97.5%') %>% 
+  mutate(mean = round(mean*100, digits = 1),
+         low = round(low*100, digits = 1),
+         high = round(high*100, digits = 1)) %>% 
+  tt() %>% 
+  group_tt(
+    j = list(
+      "estimate" = 2:4))
+```
+
+@tbl-medium shows the expected ordinal treatment effect of thrombectomy in this trial.
+
+```{r}
+#| echo: false
+#| label: tbl-medium
+#| tbl-cap: Expected ordinal treatment effect of thrombectomy in new medium stroke trial. Positive numbers reflect an absolute increase in probability of the mRS category. Negative numbers reflect an absolute decrease.
+omr_ip_rsc(omr_ip) %>% 
+  filter(type == "medium") %>% 
+  select(-type) %>% 
+  rename(mRS = variable,
+         low = '2.5%',
+         high = '97.5%') %>% 
+  mutate(mean = round(mean*100, digits = 1),
+         low = round(low*100, digits = 1),
+         high = round(high*100, digits = 1)) %>% 
+  tt() %>% 
+  group_tt(
+    j = list(
+      "estimate" = 2:4))
+```
+
+### Summary
+
+Conditional on the observed data and the model used to analyze the data, thrombectomy is expected to reliably lower the probability of bad outcomes and raise the probability of good outcomes across all stroke types. @fig-summary plots these estimates to show the trend graphically.
+
+```{r plot response scale contrasts}
+#| echo: false
+#| label: fig-summary
+#| fig-cap: Expected ordinal treatment effect of thrombectomy in a hypothetical new trial
+ggplot(data = omr_ip_rsc(omr_ip), 
+       aes(y = mean, 
+           x = variable,
+           color = type,
+           group = type)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = `2.5%`, 
+                    ymax = `97.5%`),
+                position = position_dodge(width = 0.5),
+                width = 0.2) +
+  # Add a horizontal line at y = 0 for reference
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  # Customize colors and theme
+  scale_color_brewer(palette = "Set1") +
+  scale_x_continuous(breaks = 0:6) +
+  theme_bw(base_size = 12) +
+  # Customize labels
+  labs(y = "Probability",
+       x = "mRS",
+       color = "Type") +
+  # Adjust theme elements for better readability
+  theme(panel.grid = element_blank(),
+        legend.position = "right") 
+```
+
+These treatment effects should be considered in the context of the expected probability of each outcome with medical treatment alone, as shown in @fig-summarybaserates, which shows considerable variation by stroke type.
+
+```{r}
+#| echo: false
+#| label: fig-summarybaserates
+#| fig-cap: Expected ordinal probabilities in a new trial with medical treatment alone
+ggplot(data = omr_ip_rsb(omr_ip), 
+       aes(y = mean, 
+           x = variable,
+           color = type,
+           group = type)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = `2.5%`, 
+                    ymax = `97.5%`),
+                position = position_dodge(width = 0.5),
+                width = 0.2) +
+  # Add a horizontal line at y = 0 for reference
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  # Customize colors and theme
+  scale_color_brewer(palette = "Set1") +
+  scale_x_continuous(breaks = 0:6) +
+  theme_bw(base_size = 12) +
+  # Customize labels
+  labs(y = "Probability",
+       x = "mRS",
+       color = "Type") +
+  # Adjust theme elements for better readability
+  theme(panel.grid = element_blank(),
+        legend.position = "right") 
+```
+
+## Absolute dichotomous effect
+
+@tbl-dichot shows the implied dichotomous treatment effect estimate from this model.
+
+```{r dichotomous treatment effect}
+#| label: tbl-dichot
+#| tbl-cap: Effect of treatment on expected probability of mRS 0-2 in a hypothetical new trial
+# absolute contrasts
+omr_ip_ac <- function(model, types = c("large", "early", "late", "basilar", "medium", "historical")) {
+  # Initialize an empty list to store results
+  results <- list()
+  
+  # Loop through each type
+  for (current_type in types) {
+    # Create new data frames for each type
+    newdata_control <- data.frame(treatment = "medical", type = current_type)
+    newdata_treat <- data.frame(treatment = "thrombectomy", type = current_type)
+    
+    # Calculate posterior predictions
+    pp_control <- posterior_epred(
+      model,
+      newdata = newdata_control,
+      re_formula = NA,
+      ndraws = NULL
+    )
+    
+    pp_treat <- posterior_epred(
+      model,
+      newdata = newdata_treat,
+      re_formula = NA
+    )
+    
+    # Calculate difference
+    diff_posterior <- rowSums(pp_treat[, 1, 1:3]) - rowSums(pp_control[, 1, 1:3])
+    
+    # Store summary for current type
+    results[[current_type]] <- tibble(
+      mean = mean(diff_posterior),
+      "2.5%" = quantile(diff_posterior, 0.025),
+      "97.5%" = quantile(diff_posterior, 0.975)
+    ) %>%
+      mutate(type = current_type)
+  }
+  
+  # Combine all results into a single data frame
+  final_summary <- bind_rows(results) 
+  
+  return(final_summary)
+}
+
+omr_ip_ac(omr_ip) %>% 
+    rename(low = '2.5%',
+         high = '97.5%') %>% 
+  mutate(mean = round(mean*100, digits = 1),
+         low = round(low*100, digits = 1),
+         high = round(high*100, digits = 1)) %>% 
+  relocate(type, .before = mean) %>% 
+  tt() %>% 
+  group_tt(
+    j = list(
+      "estimate" = 2:4))
+```
+
+@fig-dichot plots the estimates with the observed effect for comparison.
+
+```{r plot satisfactory outcomes absolute contrasts}
+#| label: fig-dichot
+#| fig-cap: Effect of treatment on expected probability of mRS 0-2 in a hypothetical new trial. Mean observed effect plotted for comparison. 
+ggplot(data = omr_ip_ac(omr_ip), 
+       aes(y = mean, 
+           x = type,
+           color = "estimate")) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = `2.5%`, 
+                    ymax = `97.5%`),
+                position = position_dodge(width = 0.5),
+                width = 0) +
+  geom_point(data = all_dat %>% 
+               group_by(type, treatment) %>% 
+               summarize(satisfactory = sum(zero, one, two)/
+               sum(zero, one, two, three, four, five, six), 
+            .groups = "drop") %>% 
+              pivot_wider(
+                id_cols = type,
+                names_from = treatment,
+                values_from = satisfactory
+              ) %>% 
+              mutate(diff = thrombectomy - medical),
+            aes(type, diff, color = "observed"),
+            shape = 1,  # This creates an open circle
+            size = 3) +  # Optional: adjust size for better visibility
+  # Add a horizontal line at y = 0 for reference
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  # Custom color scale - black for estimate, transparent with black border for observed
+  scale_color_manual(values = c("estimate" = "black", "observed" = "black")) +
+  theme_bw(base_size = 12) +
+  # Customize labels
+  labs(y = "Probability",
+       x = "Type",
+       color = NULL) +
+  # Adjust theme elements for better readability
+  theme(panel.grid = element_blank(),
+        legend.position = "right")
+```
+
+@fig-cum plots the cumulative effects. 
+
+```{r}
+#| label: fig-cum
+#| fig-cap: Cumulative effect of treatment on expected probability of mRS 0-2 in a hypothetical new trial. 
+
+cum <- function(model, types = c("large", "early", "late", "basilar", "medium", "historical")) {
+  require(brms)
+  # Initialize an empty list to store results
+  results <- list()
+  
+  # Loop through each type
+  for (current_type in types) {
+    # Create new data frames for each type
+    newdata_control <- data.frame(treatment = "medical", type = current_type)
+    newdata_treat <- data.frame(treatment = "thrombectomy", type = current_type)
+    
+    # Calculate posterior predictions
+    pp_control <- posterior_epred(
+      model,
+      newdata = newdata_control,
+      re_formula = NA,
+      ndraws = NULL
+    )
+    
+    pp_treat <- posterior_epred(
+      model,
+      newdata = newdata_treat,
+      re_formula = NA
+    )
+    
+    # Calculate difference
+    diff_posterior <- rowSums(pp_treat[, 1, 1:3]) - rowSums(pp_control[, 1, 1:3])
+    
+    # Store summary for current type
+    results[[current_type]] <- tibble(
+      diff_posterior = diff_posterior
+    ) %>%
+      mutate(type = current_type)
+  }
+  
+  # Combine all results into a single data frame
+  final_summary <- bind_rows(results) 
+  
+  return(final_summary)
+}
+
+df <- cum(omr_ip)
+
+df <- df %>% 
+  group_by(type) %>% 
+  summarize(five_percent = mean(diff_posterior > 0.05) * 100,
+            ten_percent = mean(diff_posterior > 0.1) * 100,
+            fifteen_percent = mean(diff_posterior > 0.15) * 100,
+            twenty_percent = mean(diff_posterior > 0.2) *100)
+
+# Reshape the data to long format
+plot_data <- df %>% 
+  select(type, five_percent, ten_percent, fifteen_percent, twenty_percent) %>%
+  rename(">.05" = five_percent,
+         ">.10" = ten_percent,
+         ">.15" = fifteen_percent,
+         ">.20" = twenty_percent) %>%
+  pivot_longer(cols = c(">.05", ">.10", ">.15", ">.20"),
+               names_to = "threshold", 
+               values_to = "probability")
+
+# Create the plot
+ggplot(plot_data, aes(x = threshold, y = probability, color = type, group = type)) +
+  geom_line() +
+  geom_point(size = 3) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"), 
+                     breaks = c(0, 50, 100)) +
+  labs(x = "Predicted effect size", 
+       y = "Probability") +
+  theme_bw(base_size = 14) +
+  scale_color_brewer(palette = "Set1") 
+```
+
+# Sensitivity Analyses
+
+## Sensitivity to relative comparison versus absolute
+
+### Relative ordinal effect
+```{r}
+#| echo: false
+
+omr_ip_rsc_relative <- function(model, types = c("large", "early", "late", "basilar", "medium", "historical")) {
+  # Initialize an empty list to store results
+  results <- list()
+  
+  # Loop through each type
+  for (current_type in types) {
+    # Create new data frames for each type
+    newdata_control <- data.frame(treatment = "medical", type = current_type)
+    newdata_treat <- data.frame(treatment = "thrombectomy", type = current_type)
+    
+    # Calculate posterior predictions
+    pp_control <- posterior_epred(
+      model,
+      newdata = newdata_control,
+      re_formula = NA,
+      ndraws = NULL
+    )
+    
+    pp_treat <- posterior_epred(
+      model,
+      newdata = newdata_treat,
+      re_formula = NA
+    )
+    
+    # Calculate difference
+    diff_posterior <- pp_treat / pp_control
+    
+    # Store summary for current type
+    results[[current_type]] <- summarize_draws(
+      diff_posterior[, 1, ],
+      "mean",
+      ~quantile(.x, probs = c(0.025, 0.975))
+    ) %>%
+      mutate(type = current_type)
+  }
+  
+  # Combine all results into a single data frame
+  final_summary <- bind_rows(results) %>% 
+    mutate(variable = rep(0:6, 6))
+  
+  return(final_summary)
+}
+```
+
+@fig-relativecontrasts shows the expected relative impact of thrombectomy on mRS in a new trial. Thrombectomy has a higher relative impact for large and basilar strokes because the base-rates of poor outcomes are high and the base-rates for good outcomes are low.
+
+```{r}
+#| echo: false
+#| label: fig-relativecontrasts
+#| fig-cap: Expected relative impact of thrombectomy on mRS in new a trial
+ggplot(data = omr_ip_rsc_relative(omr_ip), 
+       aes(y = mean, 
+           x = variable,
+           color = type,
+           group = type)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = `2.5%`, 
+                    ymax = `97.5%`),
+                position = position_dodge(width = 0.5),
+                width = 0.2) +
+  # Add a horizontal line at y = 1 for reference
+  geom_hline(yintercept = 1, linetype = "dashed", alpha = 0.5) +
+  # Customize colors and theme
+  scale_color_brewer(palette = "Set1") +
+  scale_x_continuous(breaks = 0:7) +
+  scale_y_log10() +
+  theme_bw(base_size = 12) +
+  # Customize labels
+  labs(y = "Relative Probability",
+       x = "mRS",
+       color = "Type") +
+  # Adjust theme elements for better readability
+  theme(panel.grid = element_blank(),
+        legend.position = "right") 
+```
+
+### Relative dichotomous effect
+
+@tbl-dichotrelative shows this effect in relative terms.
+
+```{r satisfactory outcome relative contrasts}
+#| label: tbl-dichotrelative
+#| tbl-cap: Relative effect of treatment on expected probability of mRS 0-2 in a hypothetical new trial
+
+omr_ip_rc <- function(model, types = c("large", "early", "late", "basilar", "medium", "historical")) {
+  # Initialize an empty list to store results
+  results <- list()
+  
+  # Loop through each type
+  for (current_type in types) {
+    # Create new data frames for each type
+    newdata_control <- data.frame(treatment = "medical", type = current_type)
+    newdata_treat <- data.frame(treatment = "thrombectomy", type = current_type)
+    
+    # Calculate posterior predictions
+    pp_control <- posterior_epred(
+      model,
+      newdata = newdata_control,
+      re_formula = NA,
+      ndraws = NULL
+    )
+    
+    pp_treat <- posterior_epred(
+      model,
+      newdata = newdata_treat,
+      re_formula = NA
+    )
+    
+    # Calculate difference
+    diff_posterior <- rowSums(pp_treat[, 1, 1:3]) / rowSums(pp_control[, 1, 1:3])
+    
+    # Store summary for current type
+    results[[current_type]] <- tibble(
+      mean = mean(diff_posterior),
+      "2.5%" = quantile(diff_posterior, 0.025),
+      "97.5%" = quantile(diff_posterior, 0.975)
+    ) %>%
+      mutate(type = current_type)
+  }
+  
+  # Combine all results into a single data frame
+  final_summary <- bind_rows(results)
+  
+  return(final_summary)
+}
+
+omr_ip_rc(omr_ip) %>% 
+  rename(low = '2.5%',
+         high = '97.5%') %>% 
+  mutate(mean = round(mean, digits = 1),
+         low = round(low, digits = 1),
+         high = round(high, digits = 1)) %>% 
+  relocate(type, .before = mean) %>% 
+  tt() %>% 
+  group_tt(
+    j = list(
+      "estimate" = 2:4))
+```
+
+@fig-dichotrelative plots the estimates with the observed effect for comparison.
+
+```{r plot satisfactory outcome relative contrasts}
+#| label: fig-dichotrelative
+#| fig-cap: Relative effect of treatment on expected probability of mRS 0-2 in a hypothetical new trial. Mean observed effect plotted for comparison. 
+
+ggplot(data = omr_ip_rc(omr_ip), 
+       aes(y = mean, 
+           x = type,
+           color = "estimate")) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = `2.5%`, 
+                    ymax = `97.5%`),
+                position = position_dodge(width = 0.5),
+                width = 0) +
+  geom_point(data = all_dat %>% 
+               group_by(type, treatment) %>% 
+               summarize(satisfactory = sum(zero, one, two)/
+               sum(zero, one, two, three, four, five, six), 
+            .groups = "drop") %>% 
+              pivot_wider(
+                id_cols = type,
+                names_from = treatment,
+                values_from = satisfactory
+              ) %>% 
+              mutate(ratio = thrombectomy / medical),
+            aes(type, ratio, color = "observed"),
+            shape = 1,  # This creates an open circle
+            size = 3) +  # Optional: adjust size for better visibility +
+  # Add a horizontal line at y = 0 for reference
+  geom_hline(yintercept = 1, linetype = "dashed", alpha = 0.5) +
+  # Customize colors and theme
+  scale_color_manual(values = c("estimate" = "black", "observed" = "black")) +
+  theme_bw(base_size = 12) +
+  # Customize labels
+  labs(y = "Ratio",
+       x = "Type",
+       color = NULL) +
+  # Adjust theme elements for better readability
+  theme(panel.grid = element_blank(),
+        legend.position = "right")
+```
+
+## Sensitivity to prior specification
+
+With flat priors, there is no difference in out-of-sample performance.
+
+```{r}
+# omr_flat <- brm(
+#   formula = formula,
+#   data = all_dat_long,
+#   family = acat(link = "logit"),
+#   chains = 4, 
+#   cores = 4, 
+#   backend = "cmdstanr",
+#   # refresh = 0,
+#   seed = seed
+# )
+# 
+# omr_flat <- add_criterion(omr_flat, "loo")
+
+omr_flat <- readRDS("omr_flat.rds")
+
+loo_compare(omr_ip, omr_flat)
+```
+
+@fig-flat shows treatment effect estimate under flat prior assumption, which can be compared to @fig-summary, the estimates under the main model specification.
+
+```{r}
+#| echo: false
+#| label: fig-flat
+#| fig-cap: Expected impact of thrombectomy on mRS in new a trial, flat priors
+ggplot(data = omr_ip_rsc(omr_flat), 
+       aes(y = mean, 
+           x = variable,
+           color = type,
+           group = type)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = `2.5%`, 
+                    ymax = `97.5%`),
+                position = position_dodge(width = 0.5),
+                width = 0.2) +
+  # Add a horizontal line at y = 0 for reference
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  # Customize colors and theme
+  scale_color_brewer(palette = "Set1") +
+  scale_x_continuous(breaks = 0:6) +
+  theme_bw(base_size = 12) +
+  # Customize labels
+  labs(y = "Probability",
+       x = "mRS",
+       color = "Type") +
+  # Adjust theme elements for better readability
+  theme(panel.grid = element_blank(),
+        legend.position = "right") 
+```
+
+The results are virtually identical. Conclusion: reported results are relatively insensitive to prior choice.
+
+## Sensitivity to adjacent category parameterization
+
+The main model assumes the adjacent category paramerization of ordinal regression, which allows for the modelling of category specific effects. An alternative parameterization of ordinal regression, referred to as cumulative ordinal regression, makes the proportional odds assumption.
+
+```{r}
+# formula_cum <- ordinal_value ~ type + treatment + (1 + treatment | trial)
+# 
+# omr_cum <- brm(
+#   formula = formula_cum,
+#   prior = priors, 
+#   data = all_dat_long,
+#   family = cumulative(link = "logit"),
+#   chains = 4, 
+#   cores = 4, 
+#   backend = "cmdstanr",
+#   # refresh = 0,
+#   seed = seed
+# )
+
+omr_cum <- readRDS("omr_cum.rds")
+
+loo_compare(omr_ip, omr_cum)
+```
+
+In addition to making the questionable assumption that the treatment effect of thrombectomy is constant across all mRS categories, this model also results in worse out-of-sample performance.
+
+## Sensitivity to meta-regression
+
+Dropping predictors for stroke type does not result in decreased out-of-sample predictive performance.
+
+```{r}
+# drop predictors for stroke type
+# formula_oma <- ordinal_value ~ cs(treatment) + (1 + treatment | trial)
+# 
+# oma <- brm(
+#   formula = formula_oma,
+#   prior = priors, 
+#   data = all_dat_long,
+#   family = acat(link = "logit"),
+#   chains = 4, 
+#   cores = 4, 
+#   backend = "cmdstanr",
+#   # refresh = 0,
+#   seed = seed
+# )
+# 
+# oma <- add_criterion(oma, "loo")
+
+oma <- readRDS("oma.rds")
+
+loo_compare(omr_ip, oma)
+```
+
+This implies that the ordinal treatment effect of thrombectomy is relatively consistent across stroke types, at least for this data set.

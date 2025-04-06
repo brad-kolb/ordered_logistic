@@ -1,0 +1,5 @@
+group,group_id,time,one,two,three,four,five,six,seven,eight
+medical,0,6,92,4,27,15,19,18,6,7
+surgical,1,6,54,17,44,31,20,27,5,3
+medical,0,12,93,3,25,7,14,22,7,8
+surgical,1,12,59,12,35,26,20,23,14,5

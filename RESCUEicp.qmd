@@ -1,0 +1,488 @@
+---
+title: "Bayesian analysis of RESCUEicp trial"
+author: "Bradley Kolb"
+format: html
+embed-resources: true
+editor: visual
+fig-format: png
+fig-dpi: 300
+execute: 
+  echo: true
+  warning: false
+editor_options: 
+  chunk_output_type: console
+---
+
+## Packages
+
+```{r}
+library(tidyverse)
+library(cmdstanr)
+library(brms)
+library(tidybayes)
+
+seed <- 111
+```
+
+## Data
+
+The RESCUEicp trial reported 6 and 12 month GOS-E scores for traumatic brain injury patients with refractory ICP elevation randomized to usual care ("medical") versus usual care plus decompressive craniectomy ("surgery").
+
+```{r}
+data_short <- read.csv(here::here("rescue_icp.csv")) %>% 
+  as_tibble() %>% 
+  mutate(group_id = factor(group_id,
+                           levels = c(0,1),
+                           labels = c("Medical", "Surgical"))) %>% 
+  select(-group) %>% 
+  pivot_longer(
+    cols = -c(group_id, time),
+    names_to = "ordinal_value",
+    values_to = "count"
+  ) %>% 
+  mutate(ordinal_value = case_when(
+    ordinal_value == "one" ~ 1, # dead
+    ordinal_value == "two" ~ 2, # vegetative state
+    ordinal_value == "three" ~ 3, # dependent for all ADL
+    ordinal_value == "four" ~ 4, # dependent for some ADL
+    ordinal_value == "five" ~ 5, # independent for ADL but can't work/school
+    ordinal_value == "six" ~ 6, # independent for ADL, partial return work/school
+    ordinal_value == "seven" ~ 7, # deficits that affect daily life
+    ordinal_value == "eight" ~ 8, # full recovery or minor deficits
+  ))
+
+data_short
+```
+
+We can make a long version of the data for use with our statistical model.
+
+```{r}
+data_long <- data_short %>% 
+  uncount(count) %>% 
+  arrange(group_id, ordinal_value) 
+
+data_long
+```
+
+## Model
+
+GOS-E is an ordinal scale, so we should analyze the data using ordinal regression.
+
+### Cumulative ordinal regression
+
+Cumulative ordinal regression is the simplest and most common approach.
+
+This model uses binary information about the group the participants were randomized to (medical versus surgical) to predict observed GOS-E score at 6 months.
+
+```{r}
+cumulative <- brm(
+  formula = ordinal_value ~ 1 + group_id,
+  data = data_long %>% filter(time == 6),
+  family = cumulative(link = "logit"),
+  chains = 4, 
+  cores = 4, 
+  backend = "cmdstanr",
+  seed = seed,
+  refresh = 0
+)
+```
+
+For comparison purposes, we will also fit a null model which assumes no effect of surgery. This model assumes no distinguishing factors between the groups and estimates the probability of being at least a given GOS-E score at 6 months.
+
+```{r}
+null <- brm(
+  formula = ordinal_value ~ 1,
+  data = data_long %>% filter(time == 6),
+  family = cumulative(link = "logit"),
+  chains = 4, 
+  cores = 4, 
+  backend = "cmdstanr",
+  seed = seed,
+  refresh = 0
+)
+```
+
+Does the addition of the predictor term "improve" the model? One way to address this question is by assessing out-of-sample predictive performance. We will do this using leave-one-out cross-validation.
+
+```{r}
+cumulative <- add_criterion(cumulative, "loo")
+null <- add_criterion(null, "loo")
+
+loo_compare(cumulative, null)
+```
+
+Another way to assess model fit is to look at posterior predictive checks.
+
+Here is the posterior predictive check for the cumulative model.
+
+```{r}
+shared_y_scale <- scale_y_continuous(breaks = c(25, 50, 75, 100), limits = c(0, 110))
+
+pp_check(cumulative,
+         type = "bars_grouped",
+         group = "group_id",
+         ndraws = 500) +
+  ggtitle("Posterior predictive check for cumulative model") +
+  theme_bw() +
+  theme(panel.grid = element_blank()) +
+  shared_y_scale +
+  guides(fill = "none", color = "none")
+```
+
+Here is the posterior predictive check for the null model.
+
+```{r}
+# thanks o1
+
+df_null_pred <- null %>% 
+  add_predicted_draws(newdata = data_long %>% filter(time == 6))
+
+df_null_count <- df_null_pred %>%
+  group_by(group_id, .draw, .prediction) %>%
+  summarize(n_pred = n(), .groups = "drop")
+
+df_null_count_sum <- df_null_count %>%
+  group_by(group_id, .prediction) %>%
+  summarize(
+    n_mean  = mean(n_pred),
+    n_lower = quantile(n_pred, 0.025),
+    n_upper = quantile(n_pred, 0.975),
+    .groups = "drop"
+  )
+
+observed_counts <- data_long %>%
+  filter(time == 6) %>%
+  group_by(group_id, ordinal_value) %>%
+  summarize(n_obs = n(), .groups = "drop")
+
+ggplot() +
+  geom_col(
+    data = observed_counts, 
+    aes(x = factor(ordinal_value), y = n_obs), 
+    fill = "#d1e1ec"
+  ) +
+  geom_pointrange(
+    data = df_null_count_sum, 
+    aes(
+      x = factor(.prediction), 
+      y = n_mean, 
+      ymin = n_lower, 
+      ymax = n_upper
+    ),
+    color = "#011f4b"
+  ) +
+  facet_wrap(~group_id, scales = "free_y") +
+  labs(
+    x = "Ordinal Value", 
+    y = "Count", 
+    title = "Null Model Posterior Predictive Check"
+  ) +
+  # The Bayesplot-like styling:
+  theme_bw() +
+  theme(panel.grid = element_blank()) +
+  shared_y_scale 
+  
+
+```
+
+## Model refinement
+
+The standard cumulative model of ordinal regression makes two restrictive assumptions: proportional odds and equal variance. We can relax either of these assumptions to improve model performance.
+
+### Cumulative ordinal regression with unequal variance
+
+We can fit a cumulative model that does not assume that the two groups have equal variances.
+
+```{r}
+unequal_variance <- brm(
+  formula = bf(ordinal_value ~ 1 + group_id) +
+    lf(disc ~ 0 + group_id, cmc = FALSE),
+  data = data_long %>% filter(time == 6),
+  family = cumulative(link = "logit"),
+  chains = 4, 
+  cores = 4, 
+  backend = "cmdstanr",
+  seed = seed,
+  refresh = 0
+)
+```
+
+Is it better? We can compare the out-of-sample predictive performance to the null model.
+
+```{r}
+unequal_variance <- add_criterion(unequal_variance, "loo")
+
+loo_compare(null, unequal_variance)
+```
+
+We can also check the posterior predictive distribution of expected outcomes.
+
+```{r}
+shared_y_scale <- scale_y_continuous(breaks = c(25, 50, 75, 100), limits = c(0, 110))
+
+pp_check(unequal_variance,
+         type = "bars_grouped",
+         group = "group_id",
+         ndraws = 500) +
+  ggtitle("Posterior predictive check for unequal variance model") +
+  theme_bw() +
+  theme(panel.grid = element_blank()) +
+  shared_y_scale +
+  guides(fill = "none", color = "none")
+```
+
+### Adjacent category ordinal regression with category specific effects
+
+The cumulative model for ordinal regression models the effect of treatment as constant across ordinal values. The adjacent category model is more flexible, and allows for this assumption to be relaxed. In practice, this means that the model can estimate individual treatment effects for each ordinal value, rather than assuming that the treatment effect is constant across all ordinal values.
+
+```{r}
+category_specific <- brm(
+  formula = ordinal_value ~ 1 + cs(group_id),
+  data = data_long %>% filter(time == 6),
+  family = acat("logit"),
+  chains = 4, 
+  cores = 4, 
+  backend = "cmdstanr",
+  seed = seed,
+  refresh = 0
+)
+```
+
+Is it better? We can compare the out-of-sample predictive-performance to the null model.
+
+```{r}
+category_specific <- add_criterion(category_specific, "loo")
+
+loo_compare(null, category_specific)
+```
+
+We can also check the posterior predictive distribution for this model.
+
+```{r}
+pp_check(category_specific,
+         type = "bars_grouped",
+         group = "group_id",
+         ndraws = 500) +
+  ggtitle("Posterior predictive check for model with category specific effects") +
+  theme_bw() +
+  theme(panel.grid = element_blank()) +
+  shared_y_scale +
+  guides(fill = "none", color = "none")
+```
+
+## Model interpretation
+
+Now we can compare the three models in terms of their parameter estimates and predictions.
+
+### Parameter estimates
+
+The least sophisticated way of interpreting our models is to look at the parameter estimates (regression coefficients).
+
+For the cumulative model, the parameter associated with surgical intervention is positive and the 95% posterior interval excludes zero.
+
+```{r}
+fixef(cumulative, pars = "group_idSurgical")
+```
+
+For the unequal variance model, the parameter associated with surgical intervention has a similar mean and a smaller uncertainty.
+
+```{r}
+fixef(unequal_variance, pars = "group_idSurgical")
+```
+
+Relaxing the equal variance assumption improves model fit to data as well as the uncertainty in the estimated effect size.
+
+When it comes to the model with category specific effects, there is no one parameter that represents "the effect" of surgical intervention. There are seven parameters representing the effect of surgery on the transition between each adjacent category.
+
+```{r}
+paste0("group_idSurgical[", 1:7, "]") %>% 
+fixef(category_specific, pars = .)
+```
+
+### Conditional effects
+
+In ordinal regression models, trying to directly interpret regression coefficients as above is a bad idea. A better way to do things is to consider the conditional effects implied by the parameter estimates. The conditional effect of intervention in these models answers the question "what is the posterior probability of having a certain GOS-E score, conditional on receiving a specific treatment" (either medical treatment or surgical treatment).
+
+Plotting conditional effects implied by the cumulative model looks like this.
+
+```{r}
+shared_x_scale <- scale_x_continuous(breaks = c(0.1, 0.2, 0.3, 0.4, 0.5), 
+                                     limits = c(0, 0.65))
+
+p <- data_long %>% 
+ filter(time == 6) %>% 
+ modelr::data_grid(group_id) %>% 
+ tidybayes::add_epred_draws(cumulative, category = "ordinal_value") %>% 
+ ggplot(aes(x = .epred, y = ordinal_value)) +
+ coord_cartesian(expand = FALSE) +
+ facet_grid(. ~ group_id, switch = "x") +
+ theme_classic() +
+ theme(strip.background = element_blank(), 
+       strip.placement = "outside") +
+ ggtitle("P(GOS-E score | treatment) in cumulative model") +
+ xlab("treatment") +
+ ylab("GOS-E") +
+ shared_x_scale
+
+p +
+ stat_summary(fun = median, 
+              geom = "bar", 
+              fill = "gray65", 
+              width = 1, 
+              color = "white") +
+ tidybayes::stat_pointinterval(.width = 0.95)
+```
+
+The conditional effect plot for the unequal variance model is here.
+
+```{r}
+p <- data_long %>% 
+  filter(time == 6) %>% 
+  modelr::data_grid(group_id) %>% 
+  tidybayes::add_epred_draws(unequal_variance, category = "ordinal_value") %>% 
+  ggplot(aes(x = .epred, y = ordinal_value)) +
+  coord_cartesian(expand = FALSE) +
+  facet_grid(. ~ group_id, switch = "x") +
+  theme_classic() +
+  theme(strip.background = element_blank(), strip.placement = "outside") +
+  ggtitle("P(GOS-E score | treatment) in unequal variance model") +
+  xlab("treatment") +
+  ylab("GOS-E") +
+  shared_x_scale
+
+p +
+  stat_summary(fun = median, 
+               geom = "bar", 
+               fill = "gray65", 
+               width = 1, 
+               color = "white") +
+  tidybayes::stat_pointinterval(.width = 0.95)
+```
+
+For the model with category specific effects, the conditional effects plot is here.
+
+```{r}
+p <- data_long %>% 
+  filter(time == 6) %>% 
+  modelr::data_grid(group_id) %>% 
+  tidybayes::add_epred_draws(category_specific, category = "ordinal_value") %>% 
+  ggplot(aes(x = .epred, y = ordinal_value)) +
+  coord_cartesian(expand = FALSE) +
+  facet_grid(. ~ group_id, switch = "x") +
+  theme_classic() +
+  theme(strip.background = element_blank(), strip.placement = "outside") +
+  ggtitle("P(GOS-E score | treatment) in category specific model") +
+  xlab("treatment") +
+  ylab("GOS-E") +
+  shared_x_scale
+
+p +
+  stat_summary(fun = median, 
+               geom = "bar", 
+               fill = "gray65", 
+               width = 1, 
+               color = "white") +
+  tidybayes::stat_pointinterval(.width = 0.95)
+```
+
+These plots show the expected probability of being in each GOS-E category conditional on receiving medical or surgical treatment.
+
+### Generated quantities
+
+An even better way to interpret model results is to use the probabilities from the conditional effects plots to build generated quantities. Generated quantities are estimates for clinically interpretable quantities that are implied by the conditional effects. These are unique to the Bayesian framework, because it allows for the propagation of uncertainty from parameters (least interpretable) to conditional effects (moderately interpretable) to generated quantities (easily interpretable) without loss of generality or statistical rigor.
+
+For instance, we can consider the relative risk reduction associated with surgery. Here is a function to calculate the implied relative risk reduction for different categories.
+
+```{r}
+compare_groups <- function(fit, group1, group2, categories) {
+  pred1 <- posterior_epred(fit,
+    newdata = tibble(group_id = group1),
+    summary = FALSE
+  )
+  
+  pred2 <- posterior_epred(fit,
+    newdata = tibble(group_id = group2),
+    summary = FALSE
+  )
+  
+  ratio <- rowSums(pred2[, 1, 1:categories]) / rowSums(pred1[, 1, 1:categories])
+  
+  list(
+    mean = mean(ratio),
+    pi = quantile(ratio, probs = c(0.025, 0.975)),
+    prob_less_than_1 = mean(ratio < 1)
+  )
+}
+```
+
+### Relative risk reduction - death or vegetative state
+
+We can first consider the expected relative risk reduction associated with surgery of death or vegetative state at six months (GOS-E 1 or 2). This is a clinically relevant category, because some clinicians think that the main effect of craniectomy is to take people that would have died and give them the outcome of permanent vegatative state instead.
+
+For the cumulative model, this estimate is calculated as follows.
+
+```{r}
+compare_groups(cumulative, "Medical", "Surgical", 2)$mean
+compare_groups(cumulative, "Medical", "Surgical", 2)$pi
+```
+
+For the unequal variance model, the estimate is:
+
+```{r}
+compare_groups(unequal_variance, "Medical", "Surgical", 2)$mean
+compare_groups(unequal_variance, "Medical", "Surgical", 2)$pi
+```
+
+For the model with category specific effects, the estimate is:
+
+```{r}
+compare_groups(category_specific, "Medical", "Surgical", 2)$mean
+compare_groups(category_specific, "Medical", "Surgical", 2)$pi
+```
+
+The posterior probability that surgical intervention reduced the risk of death or vegetative state in the RESCUEicp trial is at least 95% in all three models.
+
+```{r}
+compare_groups(cumulative, "Medical", "Surgical", 2)$prob_less_than_1
+compare_groups(unequal_variance, "Medical", "Surgical", 2)$prob_less_than_1
+compare_groups(category_specific, "Medical", "Surgical", 2)$prob_less_than_1
+```
+
+The RESCUEicp trial offers strong evidence that decompressive craniectomy reduces the risk of death or vegetative state on average.
+
+### Relative risk reduction - poor outcome
+
+The RESCUEicp investigators defined poor outcome as GOS-E score 1, 2, or 3. Based on clinical experience, this is a defensible choice. When families are making decision on whether to pursue surgery, they often suspect that even in the best case scenario, surgery will not offer a good chance at complete recovery. What they often want to know is whether surgery will allow for a recovery that offers an "acceptable" quality of life. In this case, we are broadly defining an unacceptable outcome as dead, in a vegetative state, or not in a vegetative state but being completely home bound and requiring 24 hour care. In short, death or a fate that might be considered "worse than death." We can consider what the three models imply about the relative risk reduction of such "unacceptable" outcomes.
+
+Cumulative model:
+
+```{r}
+compare_groups(cumulative, "Medical", "Surgical", 3)$mean
+compare_groups(cumulative, "Medical", "Surgical", 3)$pi
+```
+
+Adjacent category model:
+
+```{r}
+compare_groups(unequal_variance, "Medical", "Surgical", 3)$mean
+compare_groups(unequal_variance, "Medical", "Surgical", 3)$pi
+```
+
+Model with category specific effects:
+
+```{r}
+compare_groups(category_specific, "Medical", "Surgical", 3)$mean
+compare_groups(category_specific, "Medical", "Surgical", 3)$pi
+```
+
+The posterior probability that surgical intervention reduced the risk of poor outcome in the RESCUEicp trial is at least 95% in all three models.
+
+```{r}
+compare_groups(cumulative, "Medical", "Surgical", 3)$prob_less_than_1
+compare_groups(unequal_variance, "Medical", "Surgical", 3)$prob_less_than_1
+compare_groups(category_specific, "Medical", "Surgical", 3)$prob_less_than_1
+```
+
+## Conclusion
+
+Ordinal regression supports the effectiveness of surgery in the RESCUEicp trial for reducing the probability of outcomes that are generally considered "unacceptable" by patients and families.

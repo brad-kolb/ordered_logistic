@@ -50,7 +50,7 @@ all_dat %>%
       "mRS at six months" = 4:10))
 ```
 
-"Large" refers to anterior circulation strokes with a large infarct core. "Early" refers to anterior circulation strokes with a small core, treated in an early time window. "Late" refers to anterior circulation strokes with a small core, treated in an extended time window. "Basilar" refers to posterior circulation strokes due to vertebro-basilar occlusion. "Medium" refers to anterior circulation strokes due to medium vessel occlusion. 
+"Large" refers to anterior circulation strokes with a large infarct core. "Early" refers to anterior circulation strokes with a small core, treated in an early time window. "Late" refers to anterior circulation strokes with a small core, treated in an extended time window. "Basilar" refers to posterior circulation strokes due to vertebro-basilar occlusion. "Medium" refers to anterior circulation strokes due to medium vessel occlusion.
 
 ## Data exploration
 
@@ -466,6 +466,7 @@ omr_ip_rsc(omr_ip) %>%
 ```
 
 ### Medium stroke
+
 @tbl-mediumbaserate shows the expected ordinal probabilities for a hypothetical patient randomized to the medical treatment arm of a new medium stroke trial.
 
 ```{r}
@@ -677,7 +678,7 @@ ggplot(data = omr_ip_ac(omr_ip),
         legend.position = "right")
 ```
 
-@fig-cum plots the cumulative effects. 
+@fig-cum plots the cumulative effects.
 
 ```{r}
 #| label: fig-cum
@@ -761,6 +762,7 @@ ggplot(plot_data, aes(x = threshold, y = probability, color = type, group = type
 ## Sensitivity to relative comparison versus absolute
 
 ### Relative ordinal effect
+
 ```{r}
 #| echo: false
 

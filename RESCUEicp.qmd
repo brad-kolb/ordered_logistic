@@ -17,9 +17,10 @@ editor_options:
 
 ```{r}
 library(tidyverse)
+library(tidybayes)
 library(cmdstanr)
 library(brms)
-library(tidybayes)
+
 
 seed <- 111
 ```
@@ -481,6 +482,103 @@ The posterior probability that surgical intervention reduced the risk of poor ou
 compare_groups(cumulative, "Medical", "Surgical", 3)$prob_less_than_1
 compare_groups(unequal_variance, "Medical", "Surgical", 3)$prob_less_than_1
 compare_groups(category_specific, "Medical", "Surgical", 3)$prob_less_than_1
+```
+
+## 
+
+## Plots
+
+```{r wrangle data}
+# Define your models and outcomes
+models <- list(
+  "Cumulative" = cumulative,
+  "Unequal Variance" = unequal_variance,
+  "Category-Specific" = category_specific
+)
+
+outcomes <- list(
+  "Death/Vegetative" = 2,
+  "Poor Outcome" = 3
+)
+
+# Create a tidy dataframe using purrr::map_dfr
+library(tidyverse)
+
+results_data <- map_dfr(names(models), function(model_name) {
+  map_dfr(names(outcomes), function(outcome_name) {
+    result <- compare_groups(models[[model_name]], "Medical", "Surgical", outcomes[[outcome_name]])
+    
+    tibble(
+      model = model_name,
+      outcome = outcome_name,
+      risk_reduction = 1 - result$mean,  # Convert relative risk to risk reduction
+      lower_95 = 1 - result$pi["97.5%"],  # Note: reversed because we're subtracting from 1
+      upper_95 = 1 - result$pi["2.5%"],   # Note: reversed because we're subtracting from 1
+      prob_benefit = result$prob_less_than_1
+    )
+  })
+})
+
+# Check the result
+results_data
+```
+
+```{r}
+final_plot <- results_data %>%
+  mutate(
+    # Ensure consistent factor ordering
+    outcome = factor(outcome, levels = c("Death/Vegetative", "Poor Outcome")),
+    model = factor(model, levels = c("Cumulative", "Unequal Variance", "Category-Specific"))
+  ) %>%
+  ggplot(aes(x = model, y = risk_reduction)) +
+  # Zero line for reference
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5, color = "black") +
+  # Point estimates with confidence intervals
+  geom_pointrange(aes(ymin = lower_95, ymax = upper_95),
+                  size = 0.6,
+                  linewidth = 0.8,
+                  color = "black") +
+  # Separate panels for each outcome
+  facet_wrap(~outcome, nrow = 1, scales = "free_y") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(-0.05, 0.5)) +
+  labs(x = NULL,  # Remove x-axis label to save space
+       y = "Risk Reduction with Surgery") +
+  theme_bw(base_size = 12) +
+  theme(
+    # Remove vertical grid lines
+    panel.grid = element_blank(),
+    # Bold outcome labels
+    strip.text = element_text(size = 16, face = "bold"),
+    # Angle x-axis text if needed for space
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    # Increase axis text size
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14)
+  )
+
+# Create a figures directory if it doesn't exist
+if (!dir.exists("figures")) {
+  dir.create("figures")
+}
+
+# Save with descriptive path
+ggsave(
+  filename = here::here("figures", "rescue_multiverse_results.pdf"),
+  plot = final_plot,
+  width = 10,
+  height = 5,
+  units = "in",
+  dpi = 300
+)
+
+ggsave(
+  filename = here::here("figures", "rescue_multiverse_results.svg"),
+  plot = final_plot,
+  width = 10,
+  height = 5,
+  units = "in"
+)
 ```
 
 ## Conclusion

@@ -54,7 +54,7 @@ all_dat_long <- all_dat %>%
     ordinal_value == "six" ~ 7
   ))
 
-formula <- ordinal_value ~ type + cs(treatment) + (1 + treatment | trial)
+formula <- ordinal_value ~ type + treatment + (1 + treatment | trial)
 priors <- c(prior(normal(0, 1), class = "b"),
             prior(normal(0, 1), class = "sd"),
             prior(normal(0, 1), class = "Intercept"))
@@ -67,8 +67,9 @@ omr_ip <- brm(
   family = acat(link = "logit"),
   chains = 4, 
   cores = 4, 
+  threads = threading(4),
   backend = "cmdstanr",
-  # refresh = 0,
+  silent = 0,
   seed = seed
 )
 
@@ -146,7 +147,7 @@ saveRDS(omr_flat, here("omr_flat.rds"))
 
 # proportional odds model
 
-formula_cum <- ordinal_value ~ type + treatment + (1 + treatment | trial)
+formula_cum <- ordinal_value ~ treatment + (1 + treatment | trial)
 
 omr_cum <- brm(
   formula = formula_cum,
@@ -155,8 +156,9 @@ omr_cum <- brm(
   family = cumulative(link = "logit"),
   chains = 4,
   cores = 4,
+  threads = threading(4),
   backend = "cmdstanr",
-  # refresh = 0,
+  silent = 0,
   seed = seed
 )
 
